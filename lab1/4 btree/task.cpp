@@ -1,0 +1,248 @@
+#include <string>
+#include <cstdint>
+#include <cstddef>
+#include <memory>
+#include <vector>
+#include <utility>
+
+void to_lower(std::string& word) {
+    for (char& c : word) {
+        if ((c >= 'A') && (c <= 'Z')) {
+            c = static_cast<char>(c - 'A' + 'a');
+        }
+    }
+}
+
+class Entry final {
+private:
+    std::string word_;
+    std::uint64_t value_;
+public:
+    Entry(std::string word, std::uint64_t value)
+        : word_(std::move(word)), value_(value) {
+        to_lower(word_);
+    }
+    explicit Entry(std::string word) 
+        : Entry(std::move(word), 0) {}
+    const std::string& word() const {
+        return word_;
+    }
+    std::uint64_t value() const {
+        return value_;
+    }
+    bool operator<(const Entry& other) const {
+        return word_ < other.word_;
+    }
+    bool operator>(const Entry& other) const {
+        return other < *this;
+    }
+    bool operator==(const Entry& other) const {
+        return word_ == other.word_;
+    }
+};
+
+class BTree final {
+private:
+
+    static constexpr std::size_t t = 3;
+    static constexpr std::size_t min_keys = t - 1;
+    static constexpr std::size_t max_keys = 2 * t - 1;
+
+    struct Node {
+        std::vector<Entry> keys;
+        std::vector<std::unique_ptr<Node>> children;
+    };
+
+    static std::size_t key_index(const Node& node, const Entry& target) {
+        std::size_t i = 0;
+        while ((i < node.keys.size()) && (node.keys[i] < target)) {
+            ++i;
+        }
+        return i;
+    }
+
+    static void split_child(Node& parent, std::size_t i) {
+        Node& child = *parent.children[i];
+        Node new_node;
+        for (std::size_t j = t; j < max_keys; ++j) {
+            new_node.keys.push_back(std::move(child.keys[j]));
+        }
+        Entry median = std::move(child.keys[t - 1]);
+        child.keys.erase(child.keys.begin() + (t - 1), child.keys.end());
+        if (!child.children.empty()) {
+            for (std::size_t j = t; j < max_keys + 1; ++j) {
+                new_node.children.push_back(std::move(child.children[j]));
+            }
+            child.children.erase(child.children.begin() + t, child.children.end());
+        }
+        parent.keys.insert(parent.keys.begin() + i, std::move(median));
+        parent.children.insert(parent.children.begin() + i + 1, std::make_unique<Node>(std::move(new_node)));
+    }
+
+    static void insert_non_full(Node& node, Entry entry) {
+        std::size_t i = key_index(node, entry);
+        if (node.children.empty()) {
+            node.keys.insert(node.keys.begin() + i, std::move(entry));
+            return;
+        }
+        if (node.children[i]->keys.size() == max_keys) {
+            split_child(node, i);
+            if (entry > node.keys[i]) {
+                ++i;
+            }
+        }
+        insert_non_full(*node.children[i], std::move(entry));
+    }
+
+    static void borrow_from_left(Node& parent, std::size_t i) {
+        Node& child = *parent.children[i];
+        Node& left = *parent.children[i - 1];
+        child.keys.insert(child.keys.begin(), std::move(parent.keys[i - 1]));
+        parent.keys[i - 1] = std::move(left.keys.back());
+        left.keys.pop_back();
+        if (!left.children.empty()) {
+            child.children.insert(child.children.begin(), std::move(left.children.back()));
+            left.children.pop_back();
+        }
+    }
+
+    static void borrow_from_right(Node& parent, std::size_t i) {
+        Node& child = *parent.children[i];
+        Node& right = *parent.children[i + 1];
+        child.keys.push_back(std::move(parent.keys[i]));
+        parent.keys[i] = std::move(right.keys.front());
+        right.keys.erase(right.keys.begin());
+        if (!right.children.empty()) {
+            child.children.push_back(std::move(right.children.front()));
+            right.children.erase(right.children.begin());
+        }
+    }
+
+    static void merge_children(Node& parent, std::size_t i) {
+        Node& left = *parent.children[i];
+        Node& right = *parent.children[i + 1];
+        left.keys.push_back(std::move(parent.keys[i]));
+        for (Entry& key : right.keys) {
+            left.keys.push_back(std::move(key));
+        }
+        for (auto& child : right.children) {
+            left.children.push_back(std::move(child));
+        }
+        parent.keys.erase(parent.keys.begin() + i);
+        parent.children.erase(parent.children.begin() + i + 1);
+    }
+
+    static Entry maximum(const Node& node) {
+        const Node* current = &node;
+        while (!current->children.empty()) {
+            current = current->children.back().get();
+        }
+        return current->keys.back();
+    }
+
+    static Entry minimum(const Node& node) {
+        const Node* current = &node;
+        while (!current->children.empty()) {
+            current = current->children.front().get();
+        }
+        return current->keys.front();
+    }
+
+    static void erase_from(Node& node, const Entry& target) {
+        std::size_t i = key_index(node, target);
+        if ((i < node.keys.size()) && (node.keys[i] == target)) {
+            if (node.children.empty()) {
+                node.keys.erase(node.keys.begin() + i);
+                return;
+            }
+            if (node.children[i]->keys.size() >= t) {
+                Entry pred = maximum(*node.children[i]);
+                erase_from(*node.children[i], pred);
+                node.keys[i] = std::move(pred);
+            } else if (node.children[i + 1]->keys.size() >= t) {
+                Entry succ = minimum(*node.children[i + 1]);
+                erase_from(*node.children[i + 1], succ);
+                node.keys[i] = std::move(succ);
+            } else {
+                merge_children(node, i);
+                erase_from(*node.children[i], target);
+            }
+            return;
+        }
+        if (node.children.empty()) {
+            return;
+        }
+        if (node.children[i]->keys.size() == min_keys) {
+            if ((i > 0) && (node.children[i - 1]->keys.size() >= t)) {
+                borrow_from_left(node, i);
+            } else if ((i < node.keys.size()) && (node.children[i + 1]->keys.size() >= t)) {
+                borrow_from_right(node, i);
+            } else if (i < node.keys.size()) {
+                merge_children(node, i);
+            } else {
+                merge_children(node, i - 1);
+                --i;
+            }
+        }
+        erase_from(*node.children[i], target);
+    }
+
+    std::unique_ptr<Node> root_;
+
+
+public:
+
+    BTree() = default;
+
+    const Entry* find(const Entry& target) const {
+        const Node* node = root_.get();
+        while (node != nullptr) {
+            const std::size_t i = key_index(*node, target);
+            if ((i < node->keys.size()) && (node->keys[i] == target)) {
+                return &(node->keys[i]);
+            }
+            if (node->children.empty()) {
+                return nullptr;
+            }
+            node = node->children[i].get();
+        }
+        return nullptr;
+    }
+
+    bool insert(Entry entry) {
+        if (find(entry) != nullptr) {
+            return false;
+        }
+        if (root_ == nullptr) {
+            root_ = std::make_unique<Node>();
+            root_->keys.push_back(std::move(entry));
+            return true;
+        }
+        if (root_->keys.size() == max_keys) {
+            auto new_root = std::make_unique<Node>();
+            new_root->children.push_back(std::move(root_));
+            split_child(*new_root, 0);
+            root_ = std::move(new_root);
+        }
+        insert_non_full(*root_, std::move(entry));
+        return true;
+    }
+
+    bool erase(const Entry& target) {
+        Entry key = target;
+        if (find(key) == nullptr) {
+            return false;
+        }
+        erase_from(*root_, key);
+        if (root_->keys.empty()) {
+            if (root_->children.empty()) {
+                root_.reset();
+            } else {
+                auto new_root = std::move(root_->children[0]);
+                root_ = std::move(new_root);
+            }
+        }
+        return true;
+    }
+
+};
