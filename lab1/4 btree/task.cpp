@@ -354,7 +354,7 @@ public:
         std::ifstream in (path, std::ios::binary);
         if (!in) {
             std::error_code ec;
-            if (std::filesystem::exists(path, ec) && (!ec)) {
+            if ((!std::filesystem::exists(path, ec)) && (!ec)) {
                 root_.reset();
                 return true;
             }
