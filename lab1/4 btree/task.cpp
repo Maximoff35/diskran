@@ -84,7 +84,7 @@ public:
 class BTree final {
 private:
 
-    static constexpr std::size_t t = 3;
+    static constexpr std::size_t t = 16;
     static constexpr std::size_t min_keys = t - 1;
     static constexpr std::size_t max_keys = 2 * t - 1;
 
@@ -251,6 +251,10 @@ private:
             return nullptr;
         }
         auto node = std::make_unique<Node>();
+        node->keys.reserve(count);
+        if (leaf == 0) {
+            node->children.reserve(static_cast<std::size_t>(count) + 1);
+        }
         for (std::size_t i = 0; i < count; ++i) {
             Entry entry("");
             if (!(in >> entry)) {
