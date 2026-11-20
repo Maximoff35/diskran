@@ -1,3 +1,4 @@
+#include <iostream>
 #include <string>
 #include <cstdint>
 #include <cstddef>
@@ -9,6 +10,7 @@
 #include <filesystem>
 #include <optional>
 #include <cstring>
+#include <exception>
 
 void to_lower(std::string& word) {
     for (char& c : word) {
@@ -45,7 +47,7 @@ public:
         return word_ == other.word_;
     }
     friend std::ostream& operator<<(std::ostream& out, const Entry& entry) {
-        const std::uint16_t length = static_cast<std::uint64_t>(entry.word_.size());
+        const std::uint16_t length = static_cast<std::uint16_t>(entry.word_.size());
         out.write(reinterpret_cast<const char*>(&length), sizeof(length));
         out.write(entry.word_.data(), length);
         out.write(reinterpret_cast<const char*>(&entry.value_), sizeof(entry.value_));
@@ -268,7 +270,7 @@ private:
                 return nullptr;
             }
         } else {
-            for (std::size_t i = 0; i < count + 1; ++i) {
+            for (std::size_t i = 0; i <= static_cast<std::size_t>(count); ++i) {
                 const Entry* child_lower = (i == 0) ? lower : &node->keys[i - 1];
                 const Entry* child_upper = (i == count) ? upper : &node->keys[i];
                 auto child = read_node(in, false, child_lower, child_upper, depth + 1, leaf_depth);
@@ -390,3 +392,60 @@ public:
         return true;        
     }
 };
+
+int main() {
+    std::ios::sync_with_stdio(false);
+    std::cin.tie(nullptr);
+    BTree tree;
+    std::string command;
+    try {
+        while (std::cin >> command) {
+            if (command == "+") {
+                std::string word;
+                std::uint64_t value;
+                if (!(std::cin >> word >> value)) break;
+                if (tree.insert(Entry{std::move(word), value})) {
+                    std::cout << "OK\n";
+                } else {
+                    std::cout << "Exist\n";
+                }
+            } else if (command == "-") {
+                std::string word;
+                if (!(std::cin >> word)) break;
+                if (tree.erase(Entry{std::move(word)})) {
+                    std::cout << "OK\n";
+                } else {
+                    std::cout << "NoSuchWord\n";
+                }
+            } else if (command == "!") {
+                std::string operation, path;
+                if (!(std::cin >> operation >> path)) {
+                    break;
+                }
+                if (operation == "Save") {
+                    if (tree.save(path)) {
+                        std::cout << "OK\n";
+                    } else {
+                        std::cout << "ERROR: Cannot save file\n";
+                    }
+                } else if (operation == "Load") {
+                    if (tree.load(path)) {
+                        std::cout << "OK\n";
+                    } else {
+                        std::cout << "ERROR: Cannot load file\n";
+                    }
+                }
+            } else {
+                const Entry* found = tree.find(Entry{std::move(command)});
+                if (found != nullptr) {
+                    std::cout << "OK: " << found->value() << '\n';
+                } else {
+                    std::cout << "NoSuchWord\n";
+                }
+            }
+        }
+    } catch (const std::exception& e) {
+        std::cout << "ERROR: " << e.what() << '\n';
+    }
+    return 0;
+}
