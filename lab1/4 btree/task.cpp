@@ -4,6 +4,11 @@
 #include <memory>
 #include <vector>
 #include <utility>
+#include <ostream>
+#include <fstream>
+#include <filesystem>
+#include <optional>
+#include <cstring>
 
 void to_lower(std::string& word) {
     for (char& c : word) {
@@ -38,6 +43,39 @@ public:
     }
     bool operator==(const Entry& other) const {
         return word_ == other.word_;
+    }
+    friend std::ostream& operator<<(std::ostream& out, const Entry& entry) {
+        const std::uint16_t length = static_cast<std::uint64_t>(entry.word_.size());
+        out.write(reinterpret_cast<const char*>(&length), sizeof(length));
+        out.write(entry.word_.data(), length);
+        out.write(reinterpret_cast<const char*>(&entry.value_), sizeof(entry.value_));
+        return out;
+    }
+    friend std::istream& operator>>(std::istream& in, Entry& entry) {
+        std::uint16_t length = 0;
+        in.read(reinterpret_cast<char*>(&length), sizeof(length));
+        if (!in) {
+            return in;
+        }
+        if ((length == 0) || (length > 256)) {
+            in.setstate(std::ios::failbit);
+            return in;
+        }
+        std::string word(length, '\0');
+        std::uint64_t value = 0;
+        in.read(word.data(), length);
+        in.read(reinterpret_cast<char*>(&value), sizeof(value));
+        if (!in) {
+            return in;
+        }
+        for (char c : word) {
+            if ((c < 'a') || (c > 'z')) {
+                in.setstate(std::ios::failbit);
+                return in;
+            }
+        }
+        entry = Entry(std::move(word), value);
+        return in;
     }
 };
 
@@ -187,6 +225,62 @@ private:
         erase_from(*node.children[i], target);
     }
 
+    static void write_node(std::ostream& out, const Node& node) {
+        const std::uint8_t count = static_cast<std::uint8_t>(node.keys.size());
+        const std::uint8_t leaf = static_cast<std::uint8_t>(node.children.empty());
+        out.write(reinterpret_cast<const char*>(&count), sizeof(count));
+        out.write(reinterpret_cast<const char*>(&leaf), sizeof(leaf));
+        for (const Entry& entry : node.keys) {
+            out << entry;
+        }
+        for (const auto& child : node.children) {
+            write_node(out, *child);
+        }
+    }
+
+    static std::unique_ptr<Node> read_node(std::istream& in, bool is_root, const Entry* lower, const Entry* upper, std::size_t depth, std::optional<std::size_t>& leaf_depth) {
+        std::uint8_t count = 0;
+        std::uint8_t leaf = 0;
+        in.read(reinterpret_cast<char*>(&count), sizeof(count));
+        in.read(reinterpret_cast<char*>(&leaf), sizeof(leaf));
+        if (!in) return nullptr;
+        if ((count < (is_root ? 1 : min_keys)) || (count > max_keys) || (leaf > 1) || (depth > 64)) {
+            in.setstate(std::ios::failbit);
+            return nullptr;
+        }
+        auto node = std::make_unique<Node>();
+        for (std::size_t i = 0; i < count; ++i) {
+            Entry entry("");
+            if (!(in >> entry)) {
+                return nullptr;
+            }
+            if ((lower && (!(*lower < entry))) || (upper && (!(*upper > entry))) || ((!node->keys.empty()) && (!(node->keys.back() < entry)))) {
+                in.setstate(std::ios::failbit);
+                return nullptr;
+            }
+            node->keys.push_back(std::move(entry));
+        }
+        if (leaf == 1) {
+            if (!leaf_depth.has_value()) {
+                leaf_depth = depth;
+            } else if (*leaf_depth != depth) {
+                in.setstate(std::ios::failbit);
+                return nullptr;
+            }
+        } else {
+            for (std::size_t i = 0; i < count + 1; ++i) {
+                const Entry* child_lower = (i == 0) ? lower : &node->keys[i - 1];
+                const Entry* child_upper = (i == count) ? upper : &node->keys[i];
+                auto child = read_node(in, false, child_lower, child_upper, depth + 1, leaf_depth);
+                if (!child) {
+                    return nullptr;
+                }
+                node->children.push_back(std::move(child));
+            }
+        }
+        return node;
+    }
+
     std::unique_ptr<Node> root_;
 
 
@@ -245,4 +339,54 @@ public:
         return true;
     }
 
+    bool save(const std::string& path) const {
+        std::ofstream out(path, std::ios::binary);
+        if (!out) return false;
+        out.write("BTREE001", 8);
+        const std::uint8_t present = static_cast<std::uint8_t>(root_ != nullptr);
+        out.write(reinterpret_cast<const char*>(&present), sizeof(present));
+        if (root_) write_node(out, *root_);
+        out.close();
+        return static_cast<bool>(out);
+    }
+
+    bool load(const std::string& path) {
+        std::ifstream in (path, std::ios::binary);
+        if (!in) {
+            std::error_code ec;
+            if (std::filesystem::exists(path, ec) && (!ec)) {
+                root_.reset();
+                return true;
+            }
+            return false;
+        }
+        if (in.peek() == std::char_traits<char>::eof()) {
+            if (!in.eof() || in.bad()) {
+                return false;
+            }
+            root_.reset();
+            return true;
+        }
+        char magic[8]{};
+        in.read(magic, sizeof(magic));
+        if ((!in) || (std::memcmp(magic, "BTREE001", 8) != 0)) {
+            return false;
+        }
+        std::uint8_t present = 0;
+        in.read(reinterpret_cast<char*>(&present), sizeof(present));
+        if ((!in) || (present > 1)) return false;
+        std::unique_ptr<Node> candidate;
+        std::optional<std::size_t> leaf_depth;
+        if (present == 1) {
+            candidate = read_node(in, true, nullptr, nullptr, 0, leaf_depth);
+            if (!candidate) {
+                return false;
+            }
+        }
+        if ((in.peek() != std::char_traits<char>::eof()) || in.bad()) {
+            return false;
+        }
+        root_ = std::move(candidate);
+        return true;        
+    }
 };
